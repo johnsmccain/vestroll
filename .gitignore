@@ -46,3 +46,11 @@ pnpm-lock.yaml
 bun.lock
 *.claude
 *CLAUDE.md
+
+# Agent and tool configurations
+.agents/
+.claude/
+.codex/
+.cursor/
+.husky/
+.opencode/
