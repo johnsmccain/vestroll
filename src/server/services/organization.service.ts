@@ -1,5 +1,5 @@
 import { db, organizations } from "../db";
-import { eq, isNull, and } from "drizzle-orm";
+import { eq, isNull, isNotNull, and } from "drizzle-orm";
 import { NotFoundError } from "../utils/errors";
 
 export interface Organization {
@@ -24,50 +24,91 @@ export interface Organization {
 
 export class OrganizationService {
   /**
-   * Soft delete an organization by setting the deletedAt timestamp
+   * Internal helper: get organization by ID (optionally include deleted)
    */
-  static async softDelete(organizationId: string): Promise<void> {
+  private static async findById(
+    organizationId: string,
+    includeDeleted = false
+  ) {
+    const conditions = includeDeleted
+      ? eq(organizations.id, organizationId)
+      : and(
+          eq(organizations.id, organizationId),
+          isNull(organizations.deletedAt)
+        );
+
     const [organization] = await db
       .select()
       .from(organizations)
-      .where(eq(organizations.id, organizationId))
+      .where(conditions)
       .limit(1);
 
-    if (!organization) {
-      throw new NotFoundError("Organization not found");
-    }
-
-    await db
-      .update(organizations)
-      .set({ deletedAt: new Date() })
-      .where(eq(organizations.id, organizationId));
+    return organization || null;
   }
 
   /**
-   * Restore a soft-deleted organization by clearing the deletedAt timestamp
+   * Soft delete an organization
    */
-  static async restore(organizationId: string): Promise<void> {
-    const [organization] = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, organizationId))
-      .limit(1);
+  static async softDelete(organizationId: string): Promise<void> {
+    const organization = await this.findById(organizationId, true);
 
     if (!organization) {
       throw new NotFoundError("Organization not found");
     }
 
+    if (organization.deletedAt) {
+      // Already deleted → no-op
+      return;
+    }
+
     await db
       .update(organizations)
-      .set({ deletedAt: null })
-      .where(eq(organizations.id, organizationId));
+      .set({
+        deletedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(organizations.id, organizationId),
+          isNull(organizations.deletedAt)
+        )
+      );
+  }
+
+  /**
+   * Restore a soft-deleted organization
+   */
+  static async restore(organizationId: string): Promise<void> {
+    const organization = await this.findById(organizationId, true);
+
+    if (!organization) {
+      throw new NotFoundError("Organization not found");
+    }
+
+    if (!organization.deletedAt) {
+      // Not deleted → no-op
+      return;
+    }
+
+    await db
+      .update(organizations)
+      .set({
+        deletedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(organizations.id, organizationId),
+          isNotNull(organizations.deletedAt)
+        )
+      );
   }
 
   /**
    * Get all active (non-deleted) organizations
    */
   static async getActiveOrganizations(): Promise<Organization[]> {
-    return await db
+    return db
       .select()
       .from(organizations)
       .where(isNull(organizations.deletedAt));
@@ -77,46 +118,35 @@ export class OrganizationService {
    * Get a single organization by ID (only if not deleted)
    */
   static async getById(organizationId: string): Promise<Organization | null> {
-    const [organization] = await db
-      .select()
-      .from(organizations)
-      .where(
-        and(
-          eq(organizations.id, organizationId),
-          isNull(organizations.deletedAt)
-        )
-      )
-      .limit(1);
-
-    return organization || null;
+    return this.findById(organizationId, false);
   }
 
   /**
-   * Get organization by ID regardless of deleted status (for admin purposes)
+   * Get organization by ID regardless of deleted status (admin use)
    */
   static async getByIdIncludingDeleted(
     organizationId: string
   ): Promise<Organization | null> {
-    const [organization] = await db
-      .select()
-      .from(organizations)
-      .where(eq(organizations.id, organizationId))
-      .limit(1);
-
-    return organization || null;
+    return this.findById(organizationId, true);
   }
 
   /**
-   * Get all organizations including deleted ones (for admin purposes)
+   * Get all organizations including deleted ones (admin use)
    */
   static async getAllOrganizations(): Promise<Organization[]> {
-    return await db.select().from(organizations);
+    return db.select().from(organizations);
   }
 
   /**
-   * Permanently delete an organization (hard delete - use with caution)
+   * Permanently delete an organization (DANGEROUS)
+   * Intended for admin/internal use only
    */
   static async hardDelete(organizationId: string): Promise<void> {
+    // Optional safety guard (recommended)
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("Hard delete is not allowed in production");
+    }
+
     await db.delete(organizations).where(eq(organizations.id, organizationId));
   }
 }
